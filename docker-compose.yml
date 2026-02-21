@@ -1,0 +1,9 @@
+services:
+  web:
+    build: .
+    container_name: factura-app
+    ports:
+      - "3002:8000"
+    volumes:
+      - .:/app
+    restart: unless-stopped

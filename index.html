@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Extractor de Facturas DIAN</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #005f73;
+            margin-bottom: 20px;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        input[type="file"] {
+            border: 2px dashed #00a896;
+            padding: 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 20px;
+            width: 300px;
+        }
+        input[type="submit"] {
+            background-color: #00a896;
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s ease;
+        }
+        input[type="submit"]:hover {
+            background-color: #005f73;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Extractor de Datos de Facturas</h1>
+        <p>Sube tu factura en formato PDF para extraer los datos a un archivo Excel.</p>
+        <form action="/uploadfile/" enctype="multipart/form-data" method="post">
+            <input name="file" type="file" accept=".pdf">
+            <input type="submit" value="Procesar y Descargar Excel">
+        </form>
+    </div>
+</body>
+</html>
