@@ -119,21 +119,41 @@ def extract_data_from_pdf(pdf_stream):
 # BANK STATEMENT EXTRACTOR
 # ─────────────────────────────────────────────
 
-# Matches lines like: "1/04 PAGO QR ERIS DAYID B. 24,300.00 3,888,729.61"
-#                 or: "1/04 ABONO INTERESES AHORROS .86 4,751,911.77"
-_TX_PATTERN = re.compile(
+# ── Bancolombia ──────────────────────────────────────────────────────────────
+# Lines: "1/04 PAGO QR ERIS DAYID B. 24,300.00 3,888,729.61"
+#        "1/04 ABONO INTERESES AHORROS .86 4,751,911.77"
+_BANCOLOMBIA_PATTERN = re.compile(
     r'^(\d{1,2}/\d{2})\s+'      # FECHA  e.g. 1/04, 15/06
     r'(.+?)\s+'                  # DESCRIPCIÓN  (non-greedy)
     r'(-?[\d,]*\.[\d]+)\s+'     # VALOR  (possibly negative, possibly ".86")
     r'(-?[\d,]*\.[\d]+)\s*$'    # SALDO
 )
 
+# ── Davivienda ───────────────────────────────────────────────────────────────
+# Lines: "01 01 9070 Abono ventas netas Mastercard 17015595 $ 0.00 $ 5,534,339.00"
+#        "02 01 0033 Pago ENEL PAGO FACTURA ... $ 1,452,470.00 $ 0.00"
+_DAVIVIENDA_PATTERN = re.compile(
+    r'^(\d{2})\s+(\d{2})\s+\d+\s+'        # DIA MES OFICINA
+    r'(.+?)\s+'                             # DESCRIPCIÓN (non-greedy)
+    r'\$\s*([\d,]+\.[\d]{2})\s+'           # DÉBITO
+    r'\$\s*([\d,]+\.[\d]{2})\s*$'          # CRÉDITO
+)
 
-def _parse_text_transactions(full_text):
-    """Parse plain-text bank statement (Bancolombia-style, no embedded tables)."""
+# Lines that are headers/footers in Davivienda — never continuations
+_DAVI_SKIP = re.compile(
+    r'^(CUENTA DE AHORROS|DAMAS|Banco Davivienda|Fecha|D.a Mes|Oficina|'
+    r'H\.\d|Apreciado|Davivienda a partir|Este producto|Cualquier diferencia|'
+    r'Recuerde que|Tel.fono|Para mayor|INFORME|Saldo Anterior|M.s Cr.ditos|'
+    r'Menos D.bitos|Nuevo Saldo|Saldo Promedio)',
+    re.IGNORECASE,
+)
+
+
+def _parse_bancolombia_text(full_text):
+    """Parse Bancolombia plain-text statement (single VALOR column + SALDO)."""
     rows = []
     for line in full_text.split('\n'):
-        m = _TX_PATTERN.match(line.strip())
+        m = _BANCOLOMBIA_PATTERN.match(line.strip())
         if not m:
             continue
         fecha, desc, valor_str, saldo_str = m.groups()
@@ -147,6 +167,52 @@ def _parse_text_transactions(full_text):
             'Saldo': saldo,
         })
     return pd.DataFrame(rows) if rows else None
+
+
+def _parse_davivienda_text(full_text):
+    """Parse Davivienda plain-text statement (separate Débito / Crédito columns)."""
+    rows = []
+    lines = full_text.split('\n')
+
+    for i, line in enumerate(lines):
+        m = _DAVIVIENDA_PATTERN.match(line.strip())
+        if not m:
+            continue
+        dia, mes, desc_raw, deb_str, cre_str = m.groups()
+
+        # Append continuation line to description when the next line is not a new
+        # transaction and not a known header/footer.
+        desc = desc_raw.strip()
+        if i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if (nxt
+                    and not _DAVIVIENDA_PATTERN.match(nxt)
+                    and not _DAVI_SKIP.match(nxt)):
+                desc = desc + ' ' + nxt
+
+        debito = clean_number(deb_str)
+        credito = clean_number(cre_str)
+
+        rows.append({
+            'Fecha': f'{dia}/{mes}',
+            'Descripción': desc,
+            'Entradas': credito if isinstance(credito, (int, float)) and credito > 0 else None,
+            'Salidas': debito if isinstance(debito, (int, float)) and debito > 0 else None,
+        })
+
+    return pd.DataFrame(rows) if rows else None
+
+
+def _parse_text_transactions(full_text):
+    """Try all known plain-text parsers and return the one with most rows."""
+    candidates = [
+        _parse_davivienda_text(full_text),
+        _parse_bancolombia_text(full_text),
+    ]
+    candidates = [df for df in candidates if df is not None and not df.empty]
+    if not candidates:
+        return None
+    return max(candidates, key=len)
 
 
 def _process_table_data(headers, rows):
@@ -193,12 +259,25 @@ def _process_table_data(headers, rows):
     return df
 
 
+# Keywords that indicate a table is a transaction table (not a summary table)
+_TX_HEADER_KEYWORDS = {'fecha', 'descripci', 'movimiento', 'concepto', 'detalle', 'transacci'}
+
+
+def _is_transaction_table(header_row):
+    """Return True if the header row looks like a financial transaction table."""
+    combined = ' '.join(str(h or '').lower() for h in header_row)
+    return any(kw in combined for kw in _TX_HEADER_KEYWORDS)
+
+
 def extract_bank_statement(pdf_stream):
     """Extract transactions from a bank statement PDF.
 
-    First tries table extraction (works for PDFs with embedded tables).
-    Falls back to line-by-line text parsing when no tables are found
-    (e.g. Bancolombia plain-text statements).
+    Strategy:
+    1. Table extraction — only uses tables whose header contains transaction
+       keywords (Fecha, Descripción, Movimiento, etc.) to avoid picking up
+       summary/totals tables.
+    2. Text parsing fallback — if no qualifying transaction table is found,
+       tries known plain-text formats (Davivienda, Bancolombia).
     """
     all_table_rows = []
     all_text_parts = []
@@ -218,19 +297,26 @@ def extract_bank_statement(pdf_stream):
                     continue
 
                 if headers is None:
-                    headers = [
+                    candidate = [
                         str(h).strip() if h else f"Col{i}"
                         for i, h in enumerate(table[0])
                     ]
+                    # Only accept tables whose headers look like transaction tables
+                    if not _is_transaction_table(candidate):
+                        continue
+                    headers = candidate
                     for row in table[1:]:
-                        padded = list(row) + [None] * (len(headers) - len(row))
-                        if any(c for c in padded if c):
-                            all_table_rows.append(padded[:len(headers)])
+                        if len(row) == len(headers) and any(c for c in row if c):
+                            all_table_rows.append(list(row))
                 else:
                     for row in table:
-                        padded = list(row) + [None] * (len(headers) - len(row))
-                        if len(padded) >= len(headers) and any(c for c in padded if c):
-                            all_table_rows.append(padded[:len(headers)])
+                        if len(row) != len(headers):
+                            continue
+                        # Skip repeated header rows
+                        if str(row[0]).strip() == str(headers[0]).strip():
+                            continue
+                        if any(c for c in row if c):
+                            all_table_rows.append(list(row))
 
     # Use table data if substantial; otherwise fall back to text parsing
     if all_table_rows and len(all_table_rows) >= 5:
