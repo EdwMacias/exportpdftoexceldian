@@ -32,12 +32,25 @@ def clean_number(value):
     last_comma = s.rfind(',')
 
     if last_dot > last_comma:
-        # Dot is decimal separator; commas are thousands separators → remove commas
-        s = s.replace(',', '')
+        # Dot is last separator (or only separator)
+        if s.count('.') > 1:
+            # Multiple dots → all are thousands separators: '1.225.000' → 1225000
+            s = s.replace('.', '').replace(',', '')
+        else:
+            # Single dot → decimal point: '24,300.00' → 24300.00
+            s = s.replace(',', '')
     elif last_comma > last_dot:
-        # Comma is decimal separator; dots are thousands separators → remove dots, comma→dot
-        s = s.replace('.', '').replace(',', '.')
-    # else: no separator at all → plain integer string, keep as-is
+        # Comma is last separator — disambiguate by digits after the last comma:
+        #   2 trailing digits  → decimal  (Colombian/European): '1,00' → 1.00
+        #   3 trailing digits  → thousands (US / peso amounts): '212,700' → 212700
+        after = s[last_comma + 1:]
+        if len(after) == 2 and after.isdigit():
+            # Treat comma as decimal separator
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            # Treat comma as thousands separator
+            s = s.replace(',', '')
+    # else: no separator → plain integer, keep as-is
 
     try:
         num = float(s)
@@ -370,6 +383,146 @@ async def upload_bank_statement(file: UploadFile = File(...)):
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=extracto_export.xlsx"}
+    )
+
+
+# ─────────────────────────────────────────────
+# PLANILLA PILA EXTRACTOR
+# ─────────────────────────────────────────────
+
+# Column mapping for the 52-column table (page 1 of the planilla)
+_PLANILLA_COLS_52 = {
+    'No': 0, 'Tipo': 1, 'ID': 2, 'Nombre': 4,
+    'Pension_Codigo': 24, 'Pension_Dias': 25, 'Pension_IBC': 26, 'Pension_Aporte': 29,
+    'Salud_EPS': 30, 'Salud_Dias': 31, 'Salud_IBC': 32, 'Salud_Aporte': 33,
+    'CCF_Codigo': 35, 'CCF_Dias': 36, 'CCF_IBC': 37, 'CCF_Aporte': 39,
+    'Riesgo_Codigo': 42, 'Riesgo_Dias': 43, 'Riesgo_IBC': 44,
+    'Riesgo_Tarifa': 45, 'Riesgo_Aporte': 46,
+    'Paraf_Dias': 47, 'Paraf_IBC': 48, 'Paraf_Aporte': 49,
+    'Exonerado': 50, 'Total': 51,
+}
+
+# Column mapping for the 43-column table (pages 2-6)
+_PLANILLA_COLS_43 = {
+    'No': 0, 'Tipo': 1, 'ID': 2, 'Nombre': 3,
+    'Pension_Codigo': 21, 'Pension_Dias': 22, 'Pension_IBC': 23, 'Pension_Aporte': 24,
+    'Salud_EPS': 25, 'Salud_Dias': 26, 'Salud_IBC': 27, 'Salud_Aporte': 28,
+    'CCF_Codigo': 29, 'CCF_Dias': 30, 'CCF_IBC': 31, 'CCF_Aporte': 32,
+    'Riesgo_Codigo': 33, 'Riesgo_Dias': 34, 'Riesgo_IBC': 35,
+    'Riesgo_Tarifa': 36, 'Riesgo_Aporte': 37,
+    'Paraf_Dias': 38, 'Paraf_IBC': 39, 'Paraf_Aporte': 40,
+    'Exonerado': 41, 'Total': 42,
+}
+
+_PLANILLA_MONEY = {
+    'Pension_IBC', 'Pension_Aporte', 'Salud_IBC', 'Salud_Aporte',
+    'CCF_IBC', 'CCF_Aporte', 'Riesgo_IBC', 'Riesgo_Aporte',
+    'Paraf_IBC', 'Paraf_Aporte', 'Total',
+}
+_PLANILLA_INT = {'Pension_Dias', 'Salud_Dias', 'CCF_Dias', 'Riesgo_Dias', 'Paraf_Dias'}
+
+_PLANILLA_RENAME = {
+    'No': 'No.', 'ID': 'Identificación',
+    'Pension_Codigo': 'Pensión_Código', 'Pension_Dias': 'Pensión_Días',
+    'Pension_IBC': 'Pensión_IBC', 'Pension_Aporte': 'Pensión_Aporte',
+    'Salud_EPS': 'Salud_EPS', 'Salud_Dias': 'Salud_Días',
+    'Salud_IBC': 'Salud_IBC', 'Salud_Aporte': 'Salud_Aporte',
+    'CCF_Codigo': 'CCF_Código', 'CCF_Dias': 'CCF_Días',
+    'CCF_IBC': 'CCF_IBC', 'CCF_Aporte': 'CCF_Aporte',
+    'Riesgo_Codigo': 'Riesgo_Código', 'Riesgo_Dias': 'Riesgo_Días',
+    'Riesgo_IBC': 'Riesgo_IBC', 'Riesgo_Tarifa': 'Riesgo_Tarifa%',
+    'Riesgo_Aporte': 'Riesgo_Aporte',
+    'Paraf_Dias': 'Paraf_Días', 'Paraf_IBC': 'Paraf_IBC', 'Paraf_Aporte': 'Paraf_Aporte',
+    'Total': 'Total_Aportes',
+}
+
+
+def extract_planilla_pila(pdf_stream):
+    """Extract per-employee data from a Planilla PILA (Colombian social security) PDF.
+
+    Handles two table layouts:
+    - 52-column (page 1): wider due to extra novedad columns on the left.
+    - 43-column (pages 2+): standard layout for the rest of the document.
+    """
+    rows = []
+
+    with pdfplumber.open(pdf_stream) as pdf:
+        for page in pdf.pages:
+            for table in page.extract_tables():
+                if not table or not table[0]:
+                    continue
+                ncols = len(table[0])
+                if ncols == 52:
+                    col_map = _PLANILLA_COLS_52
+                elif ncols == 43:
+                    col_map = _PLANILLA_COLS_43
+                else:
+                    continue  # skip summary / unknown tables
+
+                for row in table:
+                    if not row or not row[0]:
+                        continue
+                    # Only employee rows — first cell is a plain integer
+                    if not str(row[0]).strip().isdigit():
+                        continue
+
+                    record = {}
+                    for field, ci in col_map.items():
+                        val = row[ci] if ci < len(row) else None
+                        if val not in (None, ''):
+                            val = str(val).strip()
+                            if field == 'Pension_Codigo':
+                                # Code and sub-code may be joined with newline; keep first line
+                                val = val.split('\n')[0].strip()
+                            elif field == 'Riesgo_Tarifa':
+                                val = val.replace('%', '').strip()
+                                try:
+                                    val = float(val)
+                                except ValueError:
+                                    pass
+                            elif field in _PLANILLA_MONEY:
+                                val = clean_number(val)
+                            elif field in _PLANILLA_INT:
+                                try:
+                                    val = int(val.split('\n')[0].strip())
+                                except ValueError:
+                                    pass
+                            else:
+                                val = val.replace('\n', ' ')
+                        else:
+                            val = None
+                        record[field] = val
+
+                    rows.append(record)
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows).rename(columns=_PLANILLA_RENAME)
+    return df
+
+
+@app.post("/upload-planilla/")
+async def upload_planilla(file: UploadFile = File(...)):
+    pdf_content = await file.read()
+    with io.BytesIO(pdf_content) as pdf_stream:
+        df = extract_planilla_pila(pdf_stream)
+
+    if df is None or df.empty:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "No se encontraron datos de empleados en el PDF."}
+        )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Empleados')
+    output.seek(0)
+
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=planilla_pila.xlsx"}
     )
 
 

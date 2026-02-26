@@ -19,7 +19,7 @@
         .wrapper {
             display: flex;
             gap: 24px;
-            max-width: 860px;
+            max-width: 1200px;
             width: 100%;
         }
         .card {
@@ -129,6 +129,22 @@
             </form>
             <div class="status" id="invoice-status"></div>
         </div>
+
+        <div class="divider"></div>
+
+        <!-- Planilla PILA Extractor -->
+        <div class="card">
+            <h1>Planilla PILA</h1>
+            <p class="subtitle">
+                Sube tu planilla PILA en PDF para exportar el detalle de aportes
+                por empleado (Pensión, Salud, CCF, Riesgos) a Excel.
+            </p>
+            <form id="planilla-form">
+                <input name="file" type="file" accept=".pdf" required>
+                <button type="submit">Procesar y Descargar Excel</button>
+            </form>
+            <div class="status" id="planilla-status"></div>
+        </div>
     </div>
 
     <script>
@@ -176,8 +192,9 @@
             });
         }
 
-        setupForm('bank-form',    '/upload-bank/', 'bank-status',    'extracto_export.xlsx');
-        setupForm('invoice-form', '/uploadfile/',  'invoice-status', 'factura_export.xlsx');
+        setupForm('bank-form',     '/upload-bank/',      'bank-status',     'extracto_export.xlsx');
+        setupForm('invoice-form',  '/uploadfile/',       'invoice-status',  'factura_export.xlsx');
+        setupForm('planilla-form', '/upload-planilla/',  'planilla-status', 'planilla_pila.xlsx');
     </script>
 </body>
 </html>
