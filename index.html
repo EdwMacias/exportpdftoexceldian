@@ -10,18 +10,30 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             min-height: 100vh;
             display: flex;
-            justify-content: center;
+            flex-direction: column;
             align-items: center;
             background-color: #f4f7f6;
             color: #333;
-            padding: 40px 20px;
+            padding: 40px 20px 20px;
         }
         .wrapper {
             display: flex;
             gap: 24px;
             max-width: 1200px;
             width: 100%;
+            flex: 1;
         }
+        footer {
+            margin-top: 28px;
+            font-size: 0.82rem;
+            color: #999;
+            text-align: center;
+        }
+        footer a {
+            color: #00a896;
+            text-decoration: none;
+        }
+        footer a:hover { text-decoration: underline; }
         .card {
             flex: 1;
             background: white;
@@ -108,7 +120,7 @@
                 con columnas de <strong>Entradas</strong> y <strong>Salidas</strong> separadas.
             </p>
             <form id="bank-form">
-                <input name="file" type="file" accept=".pdf" required>
+                <input name="file" type="file" accept=".pdf" required aria-label="Seleccionar extracto bancario en PDF" title="Seleccionar extracto bancario en PDF">
                 <button type="submit">Procesar y Descargar Excel</button>
             </form>
             <div class="status" id="bank-status"></div>
@@ -124,7 +136,7 @@
                 con los valores en formato numérico.
             </p>
             <form id="invoice-form">
-                <input name="file" type="file" accept=".pdf" required>
+                <input name="file" type="file" accept=".pdf" required aria-label="Seleccionar factura DIAN en PDF" title="Seleccionar factura DIAN en PDF">
                 <button type="submit">Procesar y Descargar Excel</button>
             </form>
             <div class="status" id="invoice-status"></div>
@@ -140,7 +152,7 @@
                 por empleado (Pensión, Salud, CCF, Riesgos) a Excel.
             </p>
             <form id="planilla-form">
-                <input name="file" type="file" accept=".pdf" required>
+                <input name="file" type="file" accept=".pdf" required aria-label="Seleccionar planilla PILA en PDF" title="Seleccionar planilla PILA en PDF">
                 <button type="submit">Procesar y Descargar Excel</button>
             </form>
             <div class="status" id="planilla-status"></div>
@@ -196,5 +208,8 @@
         setupForm('invoice-form',  '/uploadfile/',       'invoice-status',  'factura_export.xlsx');
         setupForm('planilla-form', '/upload-planilla/',  'planilla-status', 'planilla_pila.xlsx');
     </script>
+    <footer>
+        Hecho por <a href="https://edwmacias.online" target="_blank" rel="noopener noreferrer">Edwar Macías</a>
+    </footer>
 </body>
 </html>

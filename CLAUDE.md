@@ -11,17 +11,35 @@ A **Colombian document extractor** — a FastAPI web app with three extractors:
 
 ## Running the App
 
-**Locally (development):**
+**Without Docker (development):**
 ```bash
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-**With Docker Compose (production-like):**
+**With Docker (local):**
 ```bash
 docker-compose up --build
 ```
-The app is exposed on host port `3002` (maps to container port `8000`).
+App available at `http://localhost:3002`.
+
+**With Docker + nginx (production/HTTPS):**
+```bash
+# 1. Edit nginx/nginx.conf — replace YOUR_DOMAIN with the real domain
+# 2. Obtain SSL certificate:
+certbot certonly --standalone -d tu-dominio.com
+# 3. Deploy:
+docker-compose -f docker-compose.prod.yml up --build -d
+```
+`docker-compose.yml` = local (port 3002 exposed directly).
+`docker-compose.prod.yml` = production (nginx on 80/443, app not exposed).
+
+## Running Tests
+
+```bash
+python -m pytest test_extractors.py -v
+```
+Tests cover: `clean_number` edge cases, BBVA regex/parser, Adquirencia table detection/parser, and integration tests against the real PDFs in `pdf/`. Run tests after adding any new parser.
 
 ## Debugging / Inspecting PDFs
 
@@ -29,7 +47,7 @@ Use `inspect_pdf.py` to debug raw PDF text and table extraction:
 ```bash
 python inspect_pdf.py "path/to/file.pdf"
 ```
-Prints full page 1 text and all detected tables — useful when regex patterns or table parsing break for a new format.
+Prints page 1 text and page 1 tables only — useful when regex patterns or table parsing break for a new format. Sample PDFs are in the `pdf/` directory.
 
 ## Architecture
 
@@ -39,6 +57,7 @@ Prints full page 1 text and all detected tables — useful when regex patterns o
   - `POST /upload-bank/` — Bank statement PDF → `.xlsx` (sheet: Movimientos)
   - `POST /upload-planilla/` — Planilla PILA PDF → `.xlsx` (sheet: Planilla)
 - **`index.html`**: Three-panel frontend (Extracto Bancario | Factura DIAN | Planilla PILA). Each panel uses `fetch` + `FormData` to POST the PDF and trigger a file download. No JS framework.
+- **`nginx/nginx.conf`**: Reverse proxy config for production HTTPS. Replace `YOUR_DOMAIN` before deploying.
 - **Python 3.9**, Docker image `python:3.9-slim`.
 
 ---
@@ -70,19 +89,24 @@ Converts any formatted number string to a Python `int` or `float`. Handles four 
 
 ### Bank Statement Extractor
 
-**`extract_bank_statement(pdf_stream)`** — tries two strategies in order:
+**`extract_bank_statement(pdf_stream)`** — tries three strategies in order:
 
-**Strategy 1 — Table-based** (generic banks with clean PDF tables):
+**Strategy 1a — Adquirencia (datáfonos)** (checked first):
+- `_is_adquirencia_table(table)`: detects 13-col settlement tables by checking for "Vr Abono" + "Compras" in first two rows.
+- `_parse_adquirencia_tables(all_tables)`: page 1 table has a title row (data starts at row[2]); pages 2+ have column names at row[0] (data starts at row[1]). Output: `Fecha`, `Descripción` (FR + NumAutor), `Compras`, `Comisión`, `Retefte`, `ReteIca`, `Entradas` (= Vr Abono), `Salidas` (always None).
+
+**Strategy 1b — Generic table-based** (other banks with clean PDF tables):
 - Scans all pages for tables whose header passes `_is_transaction_table()` (must contain keywords from `_TX_HEADER_KEYWORDS`: `fecha`, `descripci`, `movimiento`, `concepto`, `detalle`, `transacci`).
 - Requires ≥5 data rows to be considered valid.
 - `_process_table_data()` detects Entradas/Salidas by column keywords (débito, cargo, crédito, abono, etc.) or falls back to finding the column with the most monetary values and splitting by sign.
 
-**Strategy 2 — Text-based** (Bancolombia, Davivienda):
-- `_parse_text_transactions(full_text)` tries both text parsers and returns whichever finds more rows.
+**Strategy 2 — Text-based** (Bancolombia, Davivienda, BBVA):
+- `_parse_text_transactions(full_text)` tries all three text parsers and returns whichever finds more rows.
 - **Bancolombia** (`_BANCOLOMBIA_PATTERN`): Format `DD/MM DESCRIPCIÓN VALOR SALDO`. US number format (`24,300.00`). Positive value → Entradas, negative → Salidas.
 - **Davivienda** (`_DAVIVIENDA_PATTERN`): Format `DD MM OFIC DESCRIPCIÓN $ DÉBITO $ CRÉDITO`. Two explicit amount columns. Handles multi-line descriptions by appending continuation lines.
+- **BBVA** (`_BBVA_PATTERN`): Format `SEQ# DD-MM-YYYY DD-MM-YYYY DESCRIPCIÓN AMOUNT BALANCE`. Amounts always positive; direction inferred from balance change (prev → curr). Opening balance extracted from `"SALDO CIERRE MES ANTERIOR"` line.
 
-**`_is_transaction_table(header_row)`**: Rejects summary/credit-card tables (DINERS, VISA, MASTER, etc.) that appear in some bank PDFs by requiring transaction-specific keywords in the header.
+**`_is_transaction_table(header_row)`**: Rejects summary/credit-card tables that appear in some bank PDFs by requiring transaction-specific keywords in the header.
 
 ---
 
@@ -112,6 +136,6 @@ Page 7 (22-column summary) is ignored automatically (no match).
 
 **Invoice:** DIAN electronic invoice format only. Items table has two header rows; data starts at `item_table[2:]`.
 
-**Bank statement:** Bancolombia and Davivienda PDFs use text-based parsing. Other banks with structured tables use table-based parsing. If a bank isn't detected by either strategy, `extract_bank_statement` returns an empty DataFrame and the API returns a 422 error.
+**Bank statement:** BBVA, Bancolombia, and Davivienda use text-based parsing. Adquirencia (datáfonos) and other banks with structured tables use table-based parsing. If a bank isn't detected by any strategy, `extract_bank_statement` returns an empty DataFrame and the API returns a 422 error.
 
 **Planilla PILA:** Column positions are hardcoded for the 52-col and 43-col table formats observed in practice. If a planilla uses a different layout, the column maps need to be updated.

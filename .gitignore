@@ -13,3 +13,7 @@ ENV/
 # IDEs
 .vscode/
 .idea/
+pdf/
+skills/
+.pytest_cache/
+.ipynb_checkpoints/

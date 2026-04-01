@@ -161,6 +161,21 @@ _DAVI_SKIP = re.compile(
     re.IGNORECASE,
 )
 
+# ── BBVA ─────────────────────────────────────────────────────────────────────
+# Lines: "23204 02-02-2026 31-01-2026 DEP. ELECTRONICO COMERCIO 0016870008 2,545,068.95 61,659,540.48"
+_BBVA_PATTERN = re.compile(
+    r'^\d{5}\s+'                   # SEQ# (5 digits)
+    r'(\d{2}-\d{2}-\d{4})\s+'     # Fecha operación
+    r'\d{2}-\d{2}-\d{4}\s+'       # Fecha valor (ignored)
+    r'(.+?)\s+'                    # Descripción (non-greedy)
+    r'([\d,]+\.\d{2})\s+'         # Monto (always positive)
+    r'([\d,]+\.\d{2})\s*$'        # Saldo
+)
+
+_BBVA_OPENING_BALANCE = re.compile(
+    r'SALDO\s+(?:CIERRE\s+MES\s+ANTERIOR|ANTERIOR)\s+([\d,]+\.\d{2})'
+)
+
 
 def _parse_bancolombia_text(full_text):
     """Parse Bancolombia plain-text statement (single VALOR column + SALDO)."""
@@ -216,11 +231,51 @@ def _parse_davivienda_text(full_text):
     return pd.DataFrame(rows) if rows else None
 
 
+def _parse_bbva_text(full_text):
+    """Parse BBVA plain-text bank statement.
+
+    Format: SEQ# FECHA_OP FECHA_VAL DESCRIPTION AMOUNT BALANCE
+    Amounts are always positive; Entrada/Salida inferred from balance change.
+    """
+    ob_match = _BBVA_OPENING_BALANCE.search(full_text)
+    prev_balance = clean_number(ob_match.group(1)) if ob_match else None
+
+    rows = []
+    for line in full_text.split('\n'):
+        m = _BBVA_PATTERN.match(line.strip())
+        if not m:
+            continue
+        fecha, desc, amount_str, balance_str = m.groups()
+        amount = clean_number(amount_str)
+        curr_balance = clean_number(balance_str)
+
+        if (prev_balance is not None
+                and isinstance(curr_balance, (int, float))
+                and isinstance(prev_balance, (int, float))):
+            delta = curr_balance - prev_balance
+            entrada = amount if delta >= 0 else None
+            salida = amount if delta < 0 else None
+        else:
+            entrada, salida = amount, None
+
+        rows.append({
+            'Fecha': fecha,
+            'Descripción': desc.strip(),
+            'Entradas': entrada,
+            'Salidas': salida,
+            'Saldo': curr_balance,
+        })
+        prev_balance = curr_balance
+
+    return pd.DataFrame(rows) if rows else None
+
+
 def _parse_text_transactions(full_text):
     """Try all known plain-text parsers and return the one with most rows."""
     candidates = [
         _parse_davivienda_text(full_text),
         _parse_bancolombia_text(full_text),
+        _parse_bbva_text(full_text),
     ]
     candidates = [df for df in candidates if df is not None and not df.empty]
     if not candidates:
@@ -282,59 +337,118 @@ def _is_transaction_table(header_row):
     return any(kw in combined for kw in _TX_HEADER_KEYWORDS)
 
 
+# ── Adquirencia (datáfonos) ───────────────────────────────────────────────────
+# 13-column settlement table from BBVA Adquirencia (card-payment processor).
+# Page 1: row[0]="Detalle de Movimientos" (title), row[1]=column names, row[2:]=data.
+# Pages 2+: row[0]=column names, row[1:]=data.
+# Columns: Fecha Abono | Fecha Op | FR | Num Autor | Cod Estab |
+#          Compras | Iva | Propina | Comisión | ReteIva | Retefte | ReteIca | Vr Abono
+
+def _is_adquirencia_table(table):
+    """Return True if the table is an Adquirencia datáfonos settlement table."""
+    if not table or len(table) < 2:
+        return False
+    for row in table[:2]:
+        row_text = ' '.join(str(c or '').lower() for c in row)
+        if 'vr abono' in row_text and 'compras' in row_text:
+            return True
+    return False
+
+
+def _parse_adquirencia_tables(all_tables):
+    """Parse Adquirencia datáfonos settlement tables collected from all pages.
+
+    Entradas = Vr Abono (net amount credited after commission).
+    Extra columns: Compras, Comisión, Retefte, ReteIca for reconciliation.
+    """
+    rows = []
+    for table in all_tables:
+        if not _is_adquirencia_table(table):
+            continue
+        row0_text = ' '.join(str(c or '').lower() for c in table[0])
+        # If row[0] is the title row ("detalle de movimientos"), data starts at row[2]
+        data_start = 1 if 'vr abono' in row0_text else 2
+
+        for row in table[data_start:]:
+            if not row or len(row) < 13:
+                continue
+            fecha = str(row[0] or '').strip()
+            if not fecha or '/' not in fecha:
+                continue
+
+            rows.append({
+                'Fecha': fecha,
+                'Descripción': f"{row[2] or ''} {row[3] or ''}".strip(),
+                'Compras': clean_number(row[5]),
+                'Comisión': clean_number(row[8]),
+                'Retefte': clean_number(row[10]),
+                'ReteIca': clean_number(row[11]),
+                'Entradas': clean_number(row[12]),
+                'Salidas': None,
+            })
+
+    return pd.DataFrame(rows) if rows else None
+
+
 def extract_bank_statement(pdf_stream):
     """Extract transactions from a bank statement PDF.
 
     Strategy:
-    1. Table extraction — only uses tables whose header contains transaction
-       keywords (Fecha, Descripción, Movimiento, etc.) to avoid picking up
-       summary/totals tables.
-    2. Text parsing fallback — if no qualifying transaction table is found,
-       tries known plain-text formats (Davivienda, Bancolombia).
+    1a. Adquirencia (datáfonos) — detected by 13-col table with 'Vr Abono' header.
+    1b. Generic table extraction — tables whose header contains transaction keywords.
+    2.  Text parsing fallback — known plain-text formats (BBVA, Davivienda, Bancolombia).
     """
-    all_table_rows = []
+    all_page_tables = []
     all_text_parts = []
-    headers = None
 
     with pdfplumber.open(pdf_stream) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
             if text:
                 all_text_parts.append(text)
-
             for table in page.extract_tables():
-                if not table or len(table) < 2:
-                    continue
-                max_cols = max((len(row) for row in table if row), default=0)
-                if max_cols < 3:
-                    continue
+                if table:
+                    all_page_tables.append(table)
 
-                if headers is None:
-                    candidate = [
-                        str(h).strip() if h else f"Col{i}"
-                        for i, h in enumerate(table[0])
-                    ]
-                    # Only accept tables whose headers look like transaction tables
-                    if not _is_transaction_table(candidate):
-                        continue
-                    headers = candidate
-                    for row in table[1:]:
-                        if len(row) == len(headers) and any(c for c in row if c):
-                            all_table_rows.append(list(row))
-                else:
-                    for row in table:
-                        if len(row) != len(headers):
-                            continue
-                        # Skip repeated header rows
-                        if str(row[0]).strip() == str(headers[0]).strip():
-                            continue
-                        if any(c for c in row if c):
-                            all_table_rows.append(list(row))
+    # Strategy 1a — Adquirencia datáfonos
+    adq_df = _parse_adquirencia_tables(all_page_tables)
+    if adq_df is not None and not adq_df.empty:
+        return adq_df
 
-    # Use table data if substantial; otherwise fall back to text parsing
+    # Strategy 1b — Generic transaction tables
+    headers = None
+    all_table_rows = []
+    for table in all_page_tables:
+        if len(table) < 2:
+            continue
+        max_cols = max((len(row) for row in table if row), default=0)
+        if max_cols < 3:
+            continue
+
+        if headers is None:
+            candidate = [
+                str(h).strip() if h else f"Col{i}"
+                for i, h in enumerate(table[0])
+            ]
+            if not _is_transaction_table(candidate):
+                continue
+            headers = candidate
+            for row in table[1:]:
+                if len(row) == len(headers) and any(c for c in row if c):
+                    all_table_rows.append(list(row))
+        else:
+            for row in table:
+                if len(row) != len(headers):
+                    continue
+                if str(row[0]).strip() == str(headers[0]).strip():
+                    continue
+                if any(c for c in row if c):
+                    all_table_rows.append(list(row))
+
     if all_table_rows and len(all_table_rows) >= 5:
         return _process_table_data(headers, all_table_rows)
 
+    # Strategy 2 — Text parsing (BBVA, Davivienda, Bancolombia)
     full_text = '\n'.join(all_text_parts)
     return _parse_text_transactions(full_text)
 
