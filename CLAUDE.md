@@ -100,11 +100,12 @@ Converts any formatted number string to a Python `int` or `float`. Handles four 
 - Requires ≥5 data rows to be considered valid.
 - `_process_table_data()` detects Entradas/Salidas by column keywords (débito, cargo, crédito, abono, etc.) or falls back to finding the column with the most monetary values and splitting by sign.
 
-**Strategy 2 — Text-based** (Bancolombia, Davivienda, BBVA):
-- `_parse_text_transactions(full_text)` tries all three text parsers and returns whichever finds more rows.
+**Strategy 2 — Text-based** (Bancolombia, Davivienda, BBVA, Scotiabank Colpatria):
+- `_parse_text_transactions(full_text)` tries all four text parsers and returns whichever finds more rows.
 - **Bancolombia** (`_BANCOLOMBIA_PATTERN`): Format `DD/MM DESCRIPCIÓN VALOR SALDO`. US number format (`24,300.00`). Positive value → Entradas, negative → Salidas.
 - **Davivienda** (`_DAVIVIENDA_PATTERN`): Format `DD MM OFIC DESCRIPCIÓN $ DÉBITO $ CRÉDITO`. Two explicit amount columns. Handles multi-line descriptions by appending continuation lines.
 - **BBVA** (`_BBVA_PATTERN`): Format `SEQ# DD-MM-YYYY DD-MM-YYYY DESCRIPCIÓN AMOUNT BALANCE`. Amounts always positive; direction inferred from balance change (prev → curr). Opening balance extracted from `"SALDO CIERRE MES ANTERIOR"` line.
+- **Scotiabank Colpatria** (`_COLPATRIA_PATTERN`): Format `D/MM/YYYY OFICINA DOC_NO DESCRIPCIÓN MONTO SALDO`. Colombian number format (`1.040.000,00`). Negative MONTO → Salidas, positive → Entradas. Reference continuation lines (`NE:...`, `PSE ...`, `NUMERO DE LOTE:...`) appended to description.
 
 **`_is_transaction_table(header_row)`**: Rejects summary/credit-card tables that appear in some bank PDFs by requiring transaction-specific keywords in the header.
 
@@ -136,6 +137,6 @@ Page 7 (22-column summary) is ignored automatically (no match).
 
 **Invoice:** DIAN electronic invoice format only. Items table has two header rows; data starts at `item_table[2:]`.
 
-**Bank statement:** BBVA, Bancolombia, and Davivienda use text-based parsing. Adquirencia (datáfonos) and other banks with structured tables use table-based parsing. If a bank isn't detected by any strategy, `extract_bank_statement` returns an empty DataFrame and the API returns a 422 error.
+**Bank statement:** BBVA, Bancolombia, Davivienda, and Scotiabank Colpatria use text-based parsing. Adquirencia (datáfonos) and other banks with structured tables use table-based parsing. If a bank isn't detected by any strategy, `extract_bank_statement` returns an empty DataFrame and the API returns a 422 error.
 
 **Planilla PILA:** Column positions are hardcoded for the 52-col and 43-col table formats observed in practice. If a planilla uses a different layout, the column maps need to be updated.

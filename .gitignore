@@ -13,6 +13,9 @@ ENV/
 # IDEs
 .vscode/
 .idea/
+
+# macOS
+.DS_Store
 pdf/
 skills/
 .pytest_cache/

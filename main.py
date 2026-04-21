@@ -176,6 +176,21 @@ _BBVA_OPENING_BALANCE = re.compile(
     r'SALDO\s+(?:CIERRE\s+MES\s+ANTERIOR|ANTERIOR)\s+([\d,]+\.\d{2})'
 )
 
+# ── Scotiabank Colpatria ──────────────────────────────────────────────────────
+# Lines: "2/02/2026 CENTRAL DE C RBAN/D.ELE/ ABONO 1.040.000,00 2.464.947,31"
+#        "6/02/2026 CENTRAL DE C PAGO-PSE-259595580 -9.900.000,00 1.492.707,31"
+# Continuation lines (reference numbers): "NE:0015353485-NCN:000001", "PSE B-000042942839"
+_COLPATRIA_PATTERN = re.compile(
+    r'^(\d{1,2}/\d{2}/\d{4})\s+'  # FECHA: D/MM/YYYY
+    r'(.+?)\s+'                     # OFICINA + No DOCUM + DESCRIPCION
+    r'(-?[\d.]+,\d{2})\s+'        # MONTO (Colombian format, may be negative)
+    r'([\d.]+,\d{2})\s*$'         # SALDO
+)
+_COLPATRIA_CONTINUATION = re.compile(
+    r'^(NE:|PSE |NUMERO DE LOTE:|[A-Z0-9]+-[A-Z0-9]+-\d)',
+    re.IGNORECASE
+)
+
 
 def _parse_bancolombia_text(full_text):
     """Parse Bancolombia plain-text statement (single VALOR column + SALDO)."""
@@ -231,6 +246,43 @@ def _parse_davivienda_text(full_text):
     return pd.DataFrame(rows) if rows else None
 
 
+def _parse_colpatria_text(full_text):
+    """Parse Scotiabank Colpatria plain-text statement.
+
+    Format: DATE OFFICE DOC_NO DESCRIPTION AMOUNT BALANCE
+    Colombian number format (dot=thousands, comma=decimal).
+    Negative AMOUNT → Salida; positive → Entrada.
+    """
+    rows = []
+    lines = full_text.split('\n')
+
+    for i, line in enumerate(lines):
+        m = _COLPATRIA_PATTERN.match(line.strip())
+        if not m:
+            continue
+        fecha, desc_raw, monto_str, saldo_str = m.groups()
+        desc = desc_raw.strip()
+
+        # Append continuation/reference line to description
+        if i + 1 < len(lines):
+            nxt = lines[i + 1].strip()
+            if nxt and _COLPATRIA_CONTINUATION.match(nxt) and len(nxt) < 60:
+                desc = desc + ' ' + nxt
+
+        monto = clean_number(monto_str)
+        saldo = clean_number(saldo_str)
+
+        rows.append({
+            'Fecha': fecha,
+            'Descripción': desc,
+            'Entradas': monto if isinstance(monto, (int, float)) and monto > 0 else None,
+            'Salidas': abs(monto) if isinstance(monto, (int, float)) and monto < 0 else None,
+            'Saldo': saldo,
+        })
+
+    return pd.DataFrame(rows) if rows else None
+
+
 def _parse_bbva_text(full_text):
     """Parse BBVA plain-text bank statement.
 
@@ -276,6 +328,7 @@ def _parse_text_transactions(full_text):
         _parse_davivienda_text(full_text),
         _parse_bancolombia_text(full_text),
         _parse_bbva_text(full_text),
+        _parse_colpatria_text(full_text),
     ]
     candidates = [df for df in candidates if df is not None and not df.empty]
     if not candidates:
